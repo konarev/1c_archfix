@@ -1,0 +1,3 @@
+[submodule "py_utils"]
+	path = py_utils
+	url = https://github.com/konarev/py_utils

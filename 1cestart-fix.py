@@ -1,4 +1,7 @@
+import collections
+import functools
 import inspect
+import itertools
 import os
 import re
 import shutil
@@ -21,6 +24,7 @@ from qtpy.QtCore import (
     QModelIndex,
     QObject,
     QSignalBlocker,
+    QStrngLi,
     Qt,
     Signal,
 )
@@ -37,6 +41,8 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 from qtpy.uic import loadUi
+
+from py_utils import utils
 
 
 def calc_file_hash(file: Path) -> int:
@@ -179,160 +185,96 @@ def find_desktop_files() -> list[DesktopFile]:
     return files
 
 
-class QDeepSignalBlocker:
-    root: QObject
-
-    def __init__(self, root: QObject) -> None:
-        self.root = root
-
-    @staticmethod
-    def block(obj, blockValue: bool):
-        for child in obj.children():
-            QDeepSignalBlocker.block(child, blockValue)
-            child.blockSignals(blockValue)
-
-    def __enter__(self) -> "QDeepSignalBlocker":
-        QDeepSignalBlocker.block(self.root, True)
-        return self
-
-    def __exit__(self, *_) -> None:
-        QDeepSignalBlocker.block(self.root, False)
+# @dataclass
+# class ExtField:
+#     field: str
+#     get_method: t.Callable | None = None
+#     set_method: t.Callable | None = None
 
 
-@dataclass
-class ExtField:
-    field: str
-    get_method: t.Callable | None = None
-    set_method: t.Callable | None = None
+# T = t.TypeVar("T")
 
 
-T = t.TypeVar("T")
-
-
-class ListGenericTypeModel(QStandardItemModel, t.Generic[T]):
+class PyClassModel(QStandardItemModel):
     def __init__(
         self,
-        object_list: list[T],
-        common_attrs: list[str | object],
+        objects: list,
+        # common_attrs: list[str | object],
+        type_object: type,
         parent_widget: QWidget,
         member_with_get_set_callable_as_attr: bool = True,
         member_property_as_attr: bool = True,
-        bind_widget_dict: t.Optional[dict[str, QWidget | tuple[QWidget]]] = None,
+        bind_widget_dict: t.Optional[dict[str, QWidget | set[QWidget]]] = None,
         /,
-        **bind_widgets_kw: QWidget | tuple[QWidget],
+        **bind_widgets_kw: QWidget | set[QWidget],
     ) -> None:
+        @functools.lru_cache
+        def _attrs_of_class(obj: type):
+            return utils.attrs_of_class(
+                obj=obj,
+                member_with_get_set_callable_as_attr=member_with_get_set_callable_as_attr,
+                member_property_as_attr=member_property_as_attr,
+            )
 
-        attrs_of_obj_cache: dict[int, t.Any] = {}
+        def get_property(widget: QWidget, name: str) -> t.Any | None:
+            if not hasattr(widget, name):
+                return None
+            return getattr(widget, name)
 
-        def attrs_of_obj(
-            obj,
-        ) -> dict[str, tuple[type, types.MethodType | None, types.MethodType | None]]:
-            """_summary_
-
-            Args:
-                obj (_type_): _description_
-
-            Returns:
-                dict[str,type,t.Callable,t.Callable]: _description_
-                имя атрибута:str
-                тип атрибута:type
-                get метод: types.MethodType=None # метод get
-                set метод: types.MethodType=None # метод set
-            """
-            if id(obj) in attrs_of_obj_cache:
-                return attrs_of_obj_cache[id(obj)]
-            result: dict[str, tuple[type, types.MethodType | None, types.MethodType | None]] = {}
-            for (name, value) in inspect.getmembers(obj):
-                prop_type = fget = fset = None
-                if member_property_as_attr and isinstance(value, property):
-                    assert inspect.ismethod(value.fget)
-                    fget = value.fget
-                    assert isinstance(
-                        (
-                            prop_type := inspect.get_annotations(fget, eval_str=True).get(
-                                "return", None
-                            )
-                        ),
-                        type,
-                    )
-                    if inspect.ismethod(value.fset):
-                        fset = value.fset
-                    result[name] = (prop_type, fget, fset)
-                elif (
-                    member_with_get_set_callable_as_attr
-                    and inspect.ismethod(value)
-                    and name.startswith("get_")
-                    and len(value.__annotations__) == 2
-                    and len(name[4:]) > 0
-                ):
-                    # value.__annotations__
-                    assert isinstance(
-                        (
-                            prop_type := inspect.get_annotations(value, eval_str=True).get(
-                                "return", None
-                            )
-                        ),
-                        type,
-                    )
-                    result_type2, _, fset = result.get(name, (prop_type, None, None))
-                    result[name] = result_type2, value, fset
-                elif (
-                    member_with_get_set_callable_as_attr
-                    and inspect.ismethod(value)
-                    and name.startswith("set_")
-                    and len(value.__annotations__) == 3
-                    and (len(name[4:]) > 0)
-                ):
-                    assert isinstance(
-                        (
-                            prop_type := next(
-                                next(iter(inspect.get_annotations(value, eval_str=True).values()))
-                            )
-                        ),
-                        type,
-                    )
-                    prop_type2, fget, _ = result.get(name, (prop_type, None, None))
-                    result[name] = prop_type2, fget, value
-                else:
-                    assert isinstance(value, type)
-                    result[name] = (
-                        value,
-                        t.cast(types.MethodType, getattr),
-                        t.cast(types.MethodType, setattr),
-                    )
-
-            return {
-                key: value for key, value in result.items() if value[1] is not None
-            }  # с непустым get
-
-        attrs: list[str] = []
-        for obj in object_list:types.MethodType
-            if isinstance(obj, str):
-                attr += obj
+        def bind_widget(
+            storage: dict[str, QWidget | set[QWidget]], widget: QWidget, attr_name: str
+        ):
+            if prev := storage.get(attr_name, None):
+                prev2 = set(prev) | set(widget)
             else:
-                for member in inspect.getmembers(obj):
-                    ...  # member.
-        self.items = object_list
-        attrs_name = list(T.__annotations__.keys())
-        # self.attrs_name.append("content")
-        # self.attrs_name.extend([name.objectName for name in vattrs])
-        self.attrs: dict[str, QWidget] = {}
-        for attr_name in attrs_name:
-            if not (attr := getattr(parent_widget, attr_name, None)):
-                continue
-            self.attrs.update({attr_name: attr})
+                prev2 = set(widget)
+            storage[attr_name] = prev2
 
-        if ext_parent_fields:
-            for attr_name in ext_parent_fields:
-                if not (attr := getattr(T, attr_name, None)):
-                    continue
-            self.attrs.update({attr_name: attr})
-        super().__init__(len(self.items), len(self.attrs), parent_widget)
+
+        class SetWidget(t.NamedTuple):
+            widgets: set[QWidget]
+            attr_desc: utils.AttrsDesc
+
+        self.objects = objects
+        self.type_object = type_object
+        attrs = _attrs_of_class(type_object)
+        self.attrs: dict[str, SetWidget] = {}
+        bind_widget_dict = bind_widget_dict or {}
+        bind_widgets_kw = bind_widgets_kw or {}
+
+        for widget in parent_widget.children():
+            if not isinstance(widget, QWidget):
+                continue
+            if attr_name := get_property(widget, "field"):
+                bind_widget(bind_widget_dict,widget,attr_name)
+            elif attrs_name := t.cast(list[str],get_property(widget, "fields")):
+                for attr_name in attrs_name:
+                    bind_widget(bind_widget_dict,widget,attr_name)
+
+
+        for attr_name, attr_desc in attrs.items():
+        # TODO: отработать вариант, когда несколько полей привязаны к одному виджету (таблица),
+        # TODO: сохранить порядок таких полей
+            if widgets := (
+                set(bind_widgets_kw.get(attr_name, set()))
+                | set(bind_widget_dict.get(attr_name, set()))
+                | set(t.cast(QWidget, getattr(parent_widget, attr_name, set())))
+            ):
+                if prev := self.attrs.get(attr_name, None):
+                    prev = SetWidget(prev.widgets | widgets, prev.attr_desc)
+                else:
+                    prev = SetWidget(widgets, attr_desc)
+
+                self.attrs[attr_name] = prev
+
+        super().__init__(len(objects), len(self.attrs), parent_widget)
 
         self.mapper = QDataWidgetMapper()
         self.mapper.setModel(self)
-        for index, (attr_name, obj) in enumerate(self.attrs.items()):
-            self.mapper.addMapping(obj, index + 1)
+        index = itertools.count(1)
+        for _, (widgets, attr_desc) in self.attrs.items():
+            for widget in widgets:
+                self.mapper.addMapping(widget, next(index))
         self.mapper.toFirst()
 
     def get_common_attrs(self):
